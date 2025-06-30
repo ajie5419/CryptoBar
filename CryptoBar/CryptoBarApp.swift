@@ -27,13 +27,29 @@ struct CryptoTickerApp: App {
 struct PopoverView: View {
     @ObservedObject var viewModel: CoinListViewModel
     @State private var newPair: String = ""
-    @State private var showingAlert = false
-    @State private var alertMessage = ""
 
     var body: some View {
         VStack(spacing: 0) {
             HeaderView(viewModel: viewModel)
                 .padding()
+
+            if viewModel.connectionState == .disconnected {
+                VStack(spacing: 4) {
+                    Image(systemName: "wifi.slash")
+                        .font(.title3)
+                        .foregroundColor(.secondary)
+                    Text("网络连接已断开")
+                        .font(.footnote)
+                        .fontWeight(.semibold)
+                    Text("正在自动重新连接...")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+                .background(Color.yellow.opacity(0.25))
+                .transition(.opacity.animation(.easeInOut))
+            }
             
             Divider()
             
@@ -41,7 +57,7 @@ struct PopoverView: View {
             
             Divider()
 
-            AddCoinView(newPair: $newPair, viewModel: viewModel, showAlert: $showingAlert, alertMessage: $alertMessage)
+            AddCoinView(newPair: $newPair, viewModel: viewModel)
                 .padding()
             
             FooterView(viewModel: viewModel)
@@ -49,9 +65,6 @@ struct PopoverView: View {
         }
         .frame(width: 320)
         .background(.ultraThinMaterial)
-        .alert(isPresented: $showingAlert) {
-            Alert(title: Text("提示"), message: Text(alertMessage), dismissButton: .default(Text("好的")))
-        }
     }
 }
 
@@ -67,6 +80,9 @@ class CoinListViewModel: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private let userDefaultsKey = "savedOKXCoinPairs"
     private let selectedCoinKey = "selectedOKXCoinSymbol"
+    
+    // 新增: 用于 API 请求的 URLSession
+    private let session = URLSession.shared
 
     init() {
         print("[诊断] 视图模型: 开始初始化。")
@@ -101,7 +117,7 @@ class CoinListViewModel: ObservableObject {
     }
     
     private func formatSymbolForOKX(_ symbol: String) -> String {
-        let s = symbol.lowercased()
+        let s = symbol.lowercased().replacingOccurrences(of: "-", with: "")
         if let range = s.range(of: "usdt") {
             let base = s[..<range.lowerBound]
             return "\(base.uppercased())-USDT"
@@ -109,22 +125,66 @@ class CoinListViewModel: ObservableObject {
         return symbol.uppercased() // Fallback
     }
 
-    func addCoin(symbol: String) -> (success: Bool, message: String) {
+    // 新增: 验证币对是否存在的函数
+    private func verifySymbolExists(symbol: String) async -> Bool {
+        guard let url = URL(string: "https://www.okx.com/api/v5/public/instruments?instType=SPOT&instId=\(symbol)") else {
+            print("[错误] 验证 API: URL 创建失败。")
+            return false
+        }
+        
+        print("[诊断] 验证 API: 正在查询: \(url.absoluteString)")
+        
+        do {
+            let (data, response) = try await session.data(from: url)
+            
+            guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+                print("[错误] 验证 API: HTTP 请求失败。")
+                return false
+            }
+            
+            // 我们只需要检查 'data' 数组是否为空
+            if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let dataArray = json["data"] as? [[String: Any]] {
+                print("[诊断] 验证 API: 查询成功，找到 \(dataArray.count) 个结果。")
+                return !dataArray.isEmpty
+            }
+        } catch {
+            print("[错误] 验证 API: 请求失败 - \(error.localizedDescription)")
+        }
+        
+        return false
+    }
+
+    // 修改: addCoin 函数现在是异步的
+    func addCoin(symbol: String) async -> (success: Bool, message: String) {
         let okxSymbol = formatSymbolForOKX(symbol)
         
         guard !coins.contains(where: { $0.symbol.uppercased() == okxSymbol.uppercased() }) else {
             let msg = "币对 '\(okxSymbol)' 已经存在。"
             return (false, msg)
         }
-        print("[诊断] 视图模型: 正在添加币对 (OKX 格式): \(okxSymbol)")
-        let newCoin = Coin(symbol: okxSymbol)
-        coins.append(newCoin)
         
-        if selectedCoinSymbol == nil {
-            selectCoin(coin: newCoin)
+        // 在添加前进行 API 验证
+        let exists = await verifySymbolExists(symbol: okxSymbol)
+        guard exists else {
+            let msg = "币对 '\(okxSymbol)' 在 OKX 交易所不存在或无效。"
+            return (false, msg)
         }
         
-        webSocketService.subscribe(to: okxSymbol)
+        print("[诊断] 视图模型: 正在添加币对 (OKX 格式): \(okxSymbol)")
+        
+        // 由于函数是异步的，确保 UI 更新在主线程上执行
+        await MainActor.run {
+            let newCoin = Coin(symbol: okxSymbol)
+            coins.append(newCoin)
+            
+            if selectedCoinSymbol == nil {
+                selectCoin(coin: newCoin)
+            }
+            
+            webSocketService.subscribe(to: okxSymbol)
+        }
+        
         return (true, "")
     }
     
@@ -163,7 +223,10 @@ class CoinListViewModel: ObservableObject {
     
     private func updateMenuBarPrice(coins: [Coin]) {
         let newMenuBarPrice: String
-        if let selectedSymbol = selectedCoinSymbol,
+
+        if connectionState == .disconnected {
+            newMenuBarPrice = "..."
+        } else if let selectedSymbol = selectedCoinSymbol,
            let selectedCoin = coins.first(where: { $0.symbol == selectedSymbol }),
            selectedCoin.price != "..." {
             
@@ -260,7 +323,7 @@ class WebSocketService {
                 self.receive()
             case .failure(let error):
                 print("[诊断] WebSocket: receive - 接收错误: \(error.localizedDescription)。")
-                self.disconnect()
+                self.disconnect(isReconnecting: true)
             }
         }
     }
@@ -519,37 +582,71 @@ struct CoinRowView: View {
 struct AddCoinView: View {
     @Binding var newPair: String
     @ObservedObject var viewModel: CoinListViewModel
-    @Binding var showAlert: Bool
-    @Binding var alertMessage: String
+    
+    // 状态管理
+    @State private var isAdding = false
+    @State private var errorMessage: String? = nil
     
     var body: some View {
-        HStack {
-            TextField("添加币对 (例如: btc-usdt)", text: $newPair)
-                .textFieldStyle(.plain)
-                .padding(8)
-                .background(Color.primary.opacity(0.1))
-                .cornerRadius(8)
-                .onSubmit(addCoin)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                TextField("添加币对 (例如: btc-usdt)", text: $newPair)
+                    .textFieldStyle(.plain)
+                    .padding(8)
+                    .background(Color.primary.opacity(0.1))
+                    .cornerRadius(8)
+                    .onSubmit(addCoin)
+                    .disabled(isAdding)
+                    .onChange(of: newPair) { _, _ in
+                        // 用户开始输入时，清除错误信息
+                        if errorMessage != nil {
+                            errorMessage = nil
+                        }
+                    }
 
-            Button(action: addCoin) {
-                Image(systemName: "plus")
+                Button(action: addCoin) {
+                    if isAdding {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: "plus")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .help("添加")
+                .disabled(isAdding || newPair.isEmpty)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .help("添加")
+            
+            // 内联错误信息显示
+            if let errorMessage = errorMessage {
+                Text(errorMessage)
+                    .font(.caption)
+                    .foregroundColor(.red)
+                    .padding(.horizontal, 8)
+                    .transition(.opacity.animation(.easeInOut))
+            }
         }
-
     }
     
     private func addCoin() {
         let pair = newPair.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !pair.isEmpty {
-            let result = viewModel.addCoin(symbol: pair)
-            if !result.success {
-                alertMessage = result.message
-                showAlert = true
+        guard !pair.isEmpty, !isAdding else { return }
+
+        isAdding = true
+        errorMessage = nil // 开始添加时清除旧错误
+        
+        Task {
+            let result = await viewModel.addCoin(symbol: pair)
+            
+            await MainActor.run {
+                if !result.success {
+                    errorMessage = result.message
+                } else {
+                    newPair = "" // 成功后才清空输入框
+                }
+                isAdding = false
             }
-            newPair = ""
         }
     }
 }
