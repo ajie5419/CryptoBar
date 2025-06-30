@@ -96,8 +96,8 @@ class CoinListViewModel: ObservableObject {
         webSocketService.priceUpdatePublisher
             .throttle(for: 1.0, scheduler: RunLoop.main, latest: true)
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] (update: (symbol: String, price: String)) in
-                self?.updateCoinPrice(symbol: update.symbol, price: update.price)
+            .sink { [weak self] (priceData: OKXResponse.TickerData) in
+                self?.updateCoinPrice(priceData: priceData)
             }
             .store(in: &cancellables)
         
@@ -208,15 +208,24 @@ class CoinListViewModel: ObservableObject {
         updateMenuBarPrice(coins: self.coins)
     }
     
-    private func updateCoinPrice(symbol: String, price: String) {
-        guard let index = coins.firstIndex(where: { $0.symbol.uppercased() == symbol.uppercased() }) else { return }
+    private func updateCoinPrice(priceData: OKXResponse.TickerData) {
+        guard let index = coins.firstIndex(where: { $0.symbol.uppercased() == priceData.instId.uppercased() }) else { return }
         
-        // ** 关键修改: 直接使用原始价格字符串，不再格式化 **
+        let price = priceData.last
         if coins[index].price != price {
             coins[index].price = price
         }
         
-        if symbol == selectedCoinSymbol {
+        // 计算并格式化24小时涨跌幅
+        if let currentPrice = Double(price), let openPrice = Double(priceData.open24h), openPrice != 0 {
+            let change = ((currentPrice - openPrice) / openPrice) * 100
+            let sign = change >= 0 ? "+" : ""
+            coins[index].change24h = String(format: "%@%.2f%%", sign, change)
+        } else {
+            coins[index].change24h = nil
+        }
+        
+        if priceData.instId == selectedCoinSymbol {
             updateMenuBarPrice(coins: self.coins)
         }
     }
@@ -279,7 +288,7 @@ class WebSocketService {
     }
     @Published var connectionState: ConnectionState = .disconnected
     
-    let priceUpdatePublisher = PassthroughSubject<(symbol: String, price: String), Never>()
+    let priceUpdatePublisher = PassthroughSubject<OKXResponse.TickerData, Never>()
     
     private var task: URLSessionWebSocketTask?
     private var session = URLSession(configuration: .default)
@@ -334,7 +343,7 @@ class WebSocketService {
         guard let data = text.data(using: .utf8) else { return }
         do {
             if let response = try? JSONDecoder().decode(OKXResponse.self, from: data), let priceData = response.data?.first {
-                priceUpdatePublisher.send((symbol: priceData.instId, price: priceData.last))
+                priceUpdatePublisher.send(priceData)
             } else if let errorResponse = try? JSONDecoder().decode(OKXErrorResponse.self, from: data) {
                 print("[诊断] WebSocket: handle - 收到错误响应: \(errorResponse.msg)")
             } else if let subscribeResponse = try? JSONDecoder().decode(OKXSubscribeResponse.self, from: data), subscribeResponse.event == "subscribe" {
@@ -436,6 +445,7 @@ struct Coin: Identifiable, Hashable {
     let id = UUID()
     let symbol: String // e.g., BTC-USDT
     var price: String = "..."
+    var change24h: String? = nil // 24小时涨跌幅
 }
 
 // MARK: - OKX WebSocket 数据结构
@@ -453,6 +463,7 @@ struct OKXResponse: Codable {
     struct TickerData: Codable {
         let instId: String
         let last: String
+        let open24h: String // 24小时开盘价
     }
     let arg: OKXRequest.Arg?
     let data: [TickerData]?
@@ -476,20 +487,22 @@ struct HeaderView: View {
     
     var body: some View {
         HStack {
-            Image(systemName: "chart.bar.xaxis")
+            Image(systemName: "chart.line.uptrend.xyaxis")
                 .font(.title2)
                 .foregroundColor(.accentColor)
 
-            Text("加密货币追踪器")
+            Text("CryptoBar")
                 .font(.headline)
+                .fontWeight(.bold)
 
             Spacer()
             
             Button(action: {
                 viewModel.refreshConnection()
             }) {
-                Image(systemName: "arrow.clockwise")
-                    .font(.body)
+                Image(systemName: "arrow.clockwise.circle.fill")
+                    .font(.title3)
+                    .foregroundColor(.secondary)
             }
             .buttonStyle(.plain)
             .help("刷新连接")
@@ -501,12 +514,13 @@ struct CoinListView: View {
     @ObservedObject var viewModel: CoinListViewModel
     var body: some View {
         ScrollView {
-            VStack(spacing: 8) {
+            LazyVStack(spacing: 0, pinnedViews: []) {
                 if viewModel.coins.isEmpty {
                     VStack {
                         Image(systemName: "tray.fill")
                             .font(.largeTitle)
                             .foregroundColor(.secondary)
+                            .padding(.bottom, 4)
                         Text("列表为空")
                             .font(.headline)
                         Text("请添加一个币对开始追踪")
@@ -514,14 +528,15 @@ struct CoinListView: View {
                             .foregroundColor(.secondary)
                     }
                     .padding()
+                    .frame(height: 200)
                 } else {
                     ForEach(viewModel.coins) { coin in
                         CoinRowView(coin: coin, viewModel: viewModel)
+                        Divider().padding(.leading, 50) // 在行之间添加分隔线
                     }
                 }
             }
-            .padding(.horizontal)
-            .padding(.top, 8)
+            .padding(.horizontal, 8)
         }
         .frame(maxHeight: 250)
     }
@@ -532,10 +547,16 @@ struct CoinRowView: View {
     @ObservedObject var viewModel: CoinListViewModel
 
     var body: some View {
-        HStack {
-            VStack(alignment: .leading) {
-                Text(coin.symbol)
-                    .fontWeight(.bold)
+        HStack(spacing: 12) {
+            // 币种图标
+            Image(systemName: "bitcoinsign.circle.fill")
+                .font(.title)
+                .foregroundColor(.primary.opacity(0.8))
+            
+            // 币种信息
+            VStack(alignment: .leading, spacing: 2) {
+                Text(coin.symbol.replacingOccurrences(of: "-USDT", with: ""))
+                    .fontWeight(.semibold)
                 Text("OKX")
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -543,38 +564,39 @@ struct CoinRowView: View {
             
             Spacer()
             
-            Text(coin.price == "..." ? "..." : "$\(coin.price)")
-                .font(.system(.title3, design: .monospaced))
-                .fontWeight(.semibold)
+            // 价格和涨跌幅
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(coin.price == "..." ? "..." : "$\(coin.price)")
+                    .font(.system(.body, design: .monospaced))
+                    .fontWeight(.medium)
+                
+                if let change = coin.change24h {
+                    Text(change)
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .foregroundColor(change.hasPrefix("+") ? .green : (change.hasPrefix("-") ? .red : .secondary))
+                }
+            }
 
-            Image(systemName: "chevron.right")
-                .font(.body.weight(.light))
-                .foregroundColor(.secondary)
-                .opacity(viewModel.selectedCoinSymbol == coin.symbol ? 1 : 0)
-
+            // 删除按钮
             Button(action: {
                 viewModel.deleteCoin(coin: coin)
             }) {
                 Image(systemName: "xmark.circle.fill")
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.secondary.opacity(0.5))
                     .font(.body)
             }
             .buttonStyle(.plain)
             .help("删除\(coin.symbol)")
         }
-        .padding()
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(.background.secondary)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(viewModel.selectedCoinSymbol == coin.symbol ? Color.accentColor : Color.clear, lineWidth: 2)
-        )
+        .padding(.vertical, 10)
+        .padding(.horizontal, 8)
+        .background(viewModel.selectedCoinSymbol == coin.symbol ? Color.accentColor.opacity(0.2) : Color.clear)
+        .cornerRadius(8)
         .onTapGesture {
             viewModel.selectCoin(coin: coin)
         }
-        .animation(.easeInOut, value: viewModel.selectedCoinSymbol)
+        .animation(.easeInOut(duration: 0.2), value: viewModel.selectedCoinSymbol)
     }
 }
 
