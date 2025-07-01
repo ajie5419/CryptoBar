@@ -1,6 +1,7 @@
 import SwiftUI
 import Combine
 import AppKit
+import UserNotifications
 
 // =================================================================================
 // MARK: - 1. 主应用入口 (现代化版本)
@@ -27,44 +28,54 @@ struct CryptoTickerApp: App {
 struct PopoverView: View {
     @ObservedObject var viewModel: CoinListViewModel
     @State private var newPair: String = ""
+    @State private var showingSettings = false
+    @StateObject private var appSettings = AppSettings()
 
     var body: some View {
-        VStack(spacing: 0) {
-            HeaderView(viewModel: viewModel)
-                .padding()
+        if showingSettings {
+            SettingsView(
+                settings: appSettings,
+                onTest: { viewModel.sendTestNotification() },
+                onDone: { showingSettings = false }
+            )
+        } else {
+            VStack(spacing: 0) {
+                HeaderView(viewModel: viewModel, onSettingsTapped: { showingSettings = true })
+                    .padding()
 
-            if viewModel.connectionState == .disconnected {
-                VStack(spacing: 4) {
-                    Image(systemName: "wifi.slash")
-                        .font(.title3)
-                        .foregroundColor(.secondary)
-                    Text("网络连接已断开")
-                        .font(.footnote)
-                        .fontWeight(.semibold)
-                    Text("正在自动重新连接...")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
+                if viewModel.connectionState == .disconnected {
+                    VStack(spacing: 4) {
+                        Image(systemName: "wifi.slash")
+                            .font(.title3)
+                            .foregroundColor(.secondary)
+                        Text("网络连接已断开")
+                            .font(.footnote)
+                            .fontWeight(.semibold)
+                        Text("正在自动重新连接...")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(Color.yellow.opacity(0.25))
+                    .transition(.opacity.animation(.easeInOut))
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 10)
-                .background(Color.yellow.opacity(0.25))
-                .transition(.opacity.animation(.easeInOut))
-            }
-            
-            Divider()
-            
-            CoinListView(viewModel: viewModel)
-            
-            Divider()
+                
+                Divider()
+                
+                CoinListView(viewModel: viewModel)
+                
+                Divider()
 
-            AddCoinView(newPair: $newPair, viewModel: viewModel)
-                .padding()
-            
-            FooterView(viewModel: viewModel)
-                .padding([.horizontal, .bottom])
+                AddCoinView(newPair: $newPair, viewModel: viewModel)
+                    .padding()
+                
+                FooterView(viewModel: viewModel)
+                    .padding([.horizontal, .bottom])
+            }
+            .frame(width: 320)
+            .background(.ultraThinMaterial)
         }
-        .frame(width: 320)
-        .background(.ultraThinMaterial)
     }
 }
 
@@ -80,6 +91,7 @@ class CoinListViewModel: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private let userDefaultsKey = "savedOKXCoinPairs"
     private let selectedCoinKey = "selectedOKXCoinSymbol"
+    private let appSettings = AppSettings()
     
     // 新增: 用于 API 请求的 URLSession
     private let session = URLSession.shared
@@ -117,12 +129,13 @@ class CoinListViewModel: ObservableObject {
     }
     
     private func formatSymbolForOKX(_ symbol: String) -> String {
-        let s = symbol.lowercased().replacingOccurrences(of: "-", with: "")
-        if let range = s.range(of: "usdt") {
-            let base = s[..<range.lowerBound]
-            return "\(base.uppercased())-USDT"
+        let s = symbol.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        // 如果用户只输入了基础货币 (例如 "BTC")，则自动添加 "-USDT"
+        if !s.contains("-") {
+            return "\(s)-USDT"
         }
-        return symbol.uppercased() // Fallback
+        // 如果用户输入了完整的交易对，则直接使用
+        return s
     }
 
     // 新增: 验证币对是否存在的函数
@@ -214,6 +227,11 @@ class CoinListViewModel: ObservableObject {
         let price = priceData.last
         if coins[index].price != price {
             coins[index].price = price
+            
+            // 新增: 更新价格历史并检查波动
+            if let priceDouble = Double(price) {
+                updatePriceHistory(for: &coins[index], newPrice: priceDouble)
+            }
         }
         
         // 计算并格式化24小时涨跌幅
@@ -228,6 +246,84 @@ class CoinListViewModel: ObservableObject {
         if priceData.instId == selectedCoinSymbol {
             updateMenuBarPrice(coins: self.coins)
         }
+    }
+    
+    // 新增: 更新价格历史记录并检查波动
+    private func updatePriceHistory(for coin: inout Coin, newPrice: Double) {
+        let now = Date()
+        
+        // 1. 添加新价格记录
+        coin.priceHistory.append((date: now, price: newPrice))
+        
+        // 2. 清理旧记录 (使用设置中的时间窗口)
+        let timeWindow = TimeInterval(appSettings.alertTimeWindow * 60)
+        let historyStartDate = now.addingTimeInterval(-timeWindow)
+        coin.priceHistory.removeAll { $0.date < historyStartDate }
+        
+        // 3. 检查波动 (如果距离上次提醒超过时间窗口)
+        if appSettings.notificationsEnabled,
+           (coin.lastAlertDate == nil || now.timeIntervalSince(coin.lastAlertDate!) > timeWindow) {
+            checkForPriceSpike(for: &coin)
+        }
+    }
+
+    // 新增: 检查价格剧烈波动
+    private func checkForPriceSpike(for coin: inout Coin) {
+        guard coin.priceHistory.count > 1 else { return }
+        
+        let recentHistory = coin.priceHistory
+        
+        guard let firstPrice = recentHistory.first?.price,
+              let lastPrice = recentHistory.last?.price else { return }
+        
+        let percentageChange = ((lastPrice - firstPrice) / firstPrice) * 100
+        
+        // 检查价格上涨或下跌是否超过设定的阈值
+        if abs(percentageChange) >= appSettings.alertThreshold {
+            let direction = percentageChange > 0 ? "上涨" : "下跌"
+            let message = "\(coin.symbol) 在过去\(appSettings.alertTimeWindow)分钟内价格\(direction)\(String(format: "%.2f", abs(percentageChange)))%。当前价格: $\(lastPrice)"
+            
+            sendNotification(title: "价格提醒", body: message)
+            
+            // 更新上次提醒时间，避免频繁提醒
+            coin.lastAlertDate = Date()
+        }
+    }
+
+    // 新增: 发送用户通知
+    func sendNotification(title: String, body: String) {
+        let center = UNUserNotificationCenter.current()
+        
+        center.requestAuthorization(options: [.alert, .sound]) { granted, error in
+            if let error = error {
+                print("[错误] 通知授权请求失败: \(error.localizedDescription)")
+                return
+            }
+            
+            guard granted else {
+                print("[信息] 用户未授权发送通知。")
+                return
+            }
+            
+            let content = UNMutableNotificationContent()
+            content.title = title
+            content.body = body
+            content.sound = .default
+            
+            let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+            center.add(request) { error in
+                if let error = error {
+                    print("[错误] 添加通知请求失败: \(error.localizedDescription)")
+                } else {
+                    print("[诊断] 通知已成功发送: \(title) - \(body)")
+                }
+            }
+        }
+    }
+
+    // 新增: 发送测试通知
+    func sendTestNotification() {
+        sendNotification(title: "涨跌报警测试", body: "这是一条测试通知。如果您能看到它，说明通知功能工作正常。")
     }
     
     private func updateMenuBarPrice(coins: [Coin]) {
@@ -446,6 +542,18 @@ struct Coin: Identifiable, Hashable {
     let symbol: String // e.g., BTC-USDT
     var price: String = "..."
     var change24h: String? = nil // 24小时涨跌幅
+
+    // 新增: 用于价格波动报警
+    var priceHistory: [(date: Date, price: Double)] = []
+    var lastAlertDate: Date?
+
+    static func == (lhs: Coin, rhs: Coin) -> Bool {
+        lhs.id == rhs.id
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
 }
 
 // MARK: - OKX WebSocket 数据结构
@@ -481,9 +589,21 @@ struct OKXSubscribeResponse: Codable {
 }
 
 
+// =================================================================================
+// MARK: - 应用设置
+// =================================================================================
+
+class AppSettings: ObservableObject {
+    @AppStorage("notificationsEnabled") var notificationsEnabled: Bool = true
+    @AppStorage("alertThreshold") var alertThreshold: Double = 1.0 // 百分比
+    @AppStorage("alertTimeWindow") var alertTimeWindow: Int = 5 // 分钟
+}
+
+
 // MARK: - 子视图完整实现
 struct HeaderView: View {
     @ObservedObject var viewModel: CoinListViewModel
+    var onSettingsTapped: () -> Void
     
     var body: some View {
         HStack {
@@ -497,6 +617,14 @@ struct HeaderView: View {
 
             Spacer()
             
+            Button(action: onSettingsTapped) {
+                Image(systemName: "gearshape.fill")
+                    .font(.title3)
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("设置")
+
             Button(action: {
                 viewModel.refreshConnection()
             }) {
@@ -616,7 +744,7 @@ struct AddCoinView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                TextField("添加币对 (例如: btc-usdt)", text: $newPair)
+                TextField("添加币对 (例如: BTC)", text: $newPair)
                     .textFieldStyle(.plain)
                     .padding(8)
                     .background(Color.primary.opacity(0.1))
@@ -718,5 +846,44 @@ struct FooterView: View {
         case .disconnected:
             return "已断开"
         }
+    }
+}
+
+// =================================================================================
+// MARK: - 设置视图
+// =================================================================================
+
+struct SettingsView: View {
+    @ObservedObject var settings: AppSettings
+    var onTest: () -> Void
+    var onDone: () -> Void
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("设置")
+                .font(.largeTitle)
+                .fontWeight(.bold)
+
+            Form {
+                Toggle("启用价格提醒", isOn: $settings.notificationsEnabled)
+                
+                if settings.notificationsEnabled {
+                    Stepper(value: $settings.alertThreshold, in: 0.1...10.0, step: 0.1) {
+                        Text("波动阈值: \(String(format: "%.1f", settings.alertThreshold))%")
+                    }
+                    
+                    Stepper("时间窗口: \(settings.alertTimeWindow) 分钟", value: $settings.alertTimeWindow, in: 1...60)
+                }
+            }
+            
+            HStack {
+                Button("测试提醒", action: onTest)
+                Spacer()
+                Button("完成", action: onDone)
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding()
+        .frame(width: 350)
     }
 }

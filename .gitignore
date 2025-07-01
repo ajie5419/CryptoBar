@@ -1,0 +1,15 @@
+# Xcode
+
+## User-specific
+.DS_Store
+*.xcodeproj/project.xcworkspace/xcuserdata/*
+*.xcodeproj/xcuserdata/*
+
+## Build products
+build/
+DerivedData/
+*.app
+
+## Swift Package Manager
+.build/
+Packages/
