@@ -30,6 +30,7 @@ struct PopoverView: View {
     @State private var newPair: String = ""
     @State private var showingSettings = false
     @StateObject private var appSettings = AppSettings()
+    @State private var selectedCoinForDetail: Coin? = nil // 用于显示详细信息
 
     var body: some View {
         if showingSettings {
@@ -38,6 +39,8 @@ struct PopoverView: View {
                 onTest: { viewModel.sendTestNotification() },
                 onDone: { showingSettings = false }
             )
+        } else if let coin = selectedCoinForDetail {
+            CoinDetailView(coin: coin, onBack: { selectedCoinForDetail = nil })
         } else {
             VStack(spacing: 0) {
                 HeaderView(viewModel: viewModel, onSettingsTapped: { showingSettings = true })
@@ -63,7 +66,13 @@ struct PopoverView: View {
                 
                 Divider()
                 
-                CoinListView(viewModel: viewModel)
+                CoinListView(viewModel: viewModel, onShowDetail: { coin in
+                    selectedCoinForDetail = coin
+                    // 异步获取详细信息
+                    Task {
+                        await viewModel.fetchCoinDetails(symbol: coin.symbol)
+                    }
+                })
                 
                 Divider()
 
@@ -224,7 +233,7 @@ class CoinListViewModel: ObservableObject {
     private func updateCoinPrice(priceData: OKXResponse.TickerData) {
         guard let index = coins.firstIndex(where: { $0.symbol.uppercased() == priceData.instId.uppercased() }) else { return }
         
-        let price = priceData.last
+        let price = priceData.last // 使用 priceData.last
         if coins[index].price != price {
             coins[index].price = price
             
@@ -233,6 +242,14 @@ class CoinListViewModel: ObservableObject {
                 updatePriceHistory(for: &coins[index], newPrice: priceDouble)
             }
         }
+        
+        // 新增: 更新详细信息
+        coins[index].high24h = priceData.high24h
+        coins[index].low24h = priceData.low24h
+        coins[index].vol24h = priceData.vol24h
+        coins[index].volCcy24h = priceData.volCcy24h
+        coins[index].sodUtc0 = priceData.sodUtc0
+        coins[index].sodUtc8 = priceData.sodUtc8
         
         // 计算并格式化24小时涨跌幅
         if let currentPrice = Double(price), let openPrice = Double(priceData.open24h), openPrice != 0 {
@@ -246,6 +263,51 @@ class CoinListViewModel: ObservableObject {
         if priceData.instId == selectedCoinSymbol {
             updateMenuBarPrice(coins: self.coins)
         }
+    }
+    
+    // 新增: 从 REST API 获取单个币对的详细信息
+    func fetchCoinDetails(symbol: String) async -> Coin? {
+        let okxSymbol = formatSymbolForOKX(symbol)
+        guard let url = URL(string: "https://www.okx.com/api/v5/market/index-tickers?instId=\(okxSymbol)") else {
+            print("[错误] 详细信息 API: URL 创建失败。")
+            return nil
+        }
+        
+        print("[诊断] 详细信息 API: 正在查询: \(url.absoluteString)")
+        
+        do {
+            let (data, response) = try await session.data(from: url)
+            
+            guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+                print("[错误] 详细信息 API: HTTP 请求失败。")
+                return nil
+            }
+            
+            let decoder = JSONDecoder()
+            if let response = try? decoder.decode(OKXResponse.self, from: data), let tickerData = response.data?.first {
+                // 找到对应的 Coin 对象并更新其详细信息
+                if let index = coins.firstIndex(where: { $0.symbol.uppercased() == tickerData.instId.uppercased() }) {
+                    await MainActor.run {
+                        // 使用 idxPx 更新 price
+                        if let idxPx = tickerData.idxPx {
+                            coins[index].price = idxPx
+                        }
+                        coins[index].high24h = tickerData.high24h
+                        coins[index].low24h = tickerData.low24h
+                        coins[index].vol24h = tickerData.vol24h
+                        coins[index].volCcy24h = tickerData.volCcy24h
+                        coins[index].sodUtc0 = tickerData.sodUtc0
+                        coins[index].sodUtc8 = tickerData.sodUtc8
+                        // 价格和24h涨跌幅已经在 WebSocket 更新时处理
+                    }
+                    return coins[index]
+                }
+            }
+        } catch {
+            print("[错误] 详细信息 API: 请求失败 - \(error.localizedDescription)")
+        }
+        
+        return nil
     }
     
     // 新增: 更新价格历史记录并检查波动
@@ -547,6 +609,14 @@ struct Coin: Identifiable, Hashable {
     var priceHistory: [(date: Date, price: Double)] = []
     var lastAlertDate: Date?
 
+    // 新增: 存储更详细的市场数据
+    var high24h: String?      // 24小时最高价
+    var low24h: String?       // 24小时最低价
+    var vol24h: String?       // 24小时成交量 (币)
+    var volCcy24h: String?    // 24小时成交量 (计价货币, e.g., USDT)
+    var sodUtc0: String?      // UTC+0 时区的开盘价
+    var sodUtc8: String?      // UTC+8 时区的开盘价
+
     static func == (lhs: Coin, rhs: Coin) -> Bool {
         lhs.id == rhs.id
     }
@@ -570,8 +640,15 @@ struct OKXRequest: Codable {
 struct OKXResponse: Codable {
     struct TickerData: Codable {
         let instId: String
-        let last: String
+        let last: String // 价格字段改回 last，以匹配 WebSocket 数据
         let open24h: String // 24小时开盘价
+        let high24h: String? // 24小时最高价
+        let low24h: String?  // 24小时最低价
+        let vol24h: String?  // 24小时成交量 (币)
+        let volCcy24h: String? // 24小时成交量 (计价货币, e.g., USDT)
+        let sodUtc0: String? // UTC+0 时区的开盘价
+        let sodUtc8: String? // UTC+8 时区的开盘价
+        let idxPx: String? // 新增：用于解析 index-tickers API 的 idxPx 字段
     }
     let arg: OKXRequest.Arg?
     let data: [TickerData]?
@@ -588,6 +665,25 @@ struct OKXSubscribeResponse: Codable {
     let arg: OKXRequest.Arg
 }
 
+extension NumberFormatter {
+    static let currencyFormatter: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .currency
+        formatter.currencySymbol = "$"
+        formatter.maximumFractionDigits = 2
+        formatter.minimumFractionDigits = 2
+        return formatter
+    }()
+
+    static let largeNumberFormatter: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.usesGroupingSeparator = true
+        formatter.groupingSeparator = ","
+        formatter.maximumFractionDigits = 0 // 默认不显示小数
+        return formatter
+    }()
+}
 
 // =================================================================================
 // MARK: - 应用设置
@@ -598,7 +694,6 @@ class AppSettings: ObservableObject {
     @AppStorage("alertThreshold") var alertThreshold: Double = 1.0 // 百分比
     @AppStorage("alertTimeWindow") var alertTimeWindow: Int = 5 // 分钟
 }
-
 
 // MARK: - 子视图完整实现
 struct HeaderView: View {
@@ -640,6 +735,8 @@ struct HeaderView: View {
 
 struct CoinListView: View {
     @ObservedObject var viewModel: CoinListViewModel
+    var onShowDetail: (Coin) -> Void
+
     var body: some View {
         ScrollView {
             LazyVStack(spacing: 0, pinnedViews: []) {
@@ -659,7 +756,7 @@ struct CoinListView: View {
                     .frame(height: 200)
                 } else {
                     ForEach(viewModel.coins) { coin in
-                        CoinRowView(coin: coin, viewModel: viewModel)
+                        CoinRowView(coin: coin, viewModel: viewModel, onShowDetail: onShowDetail)
                         Divider().padding(.leading, 50) // 在行之间添加分隔线
                     }
                 }
@@ -673,9 +770,11 @@ struct CoinListView: View {
 struct CoinRowView: View {
     let coin: Coin
     @ObservedObject var viewModel: CoinListViewModel
+    var onShowDetail: (Coin) -> Void // 新增：显示详细信息的闭包
 
     var body: some View {
         HStack(spacing: 12) {
+            // 左侧：币对信息和价格，点击选择币对
             Button(action: {
                 viewModel.selectCoin(coin: coin)
             }) {
@@ -713,7 +812,18 @@ struct CoinRowView: View {
             }
             .buttonStyle(.plain)
 
-            // Delete button is now a sibling in the outer HStack
+            // 新增：信息按钮，点击显示详细信息
+            Button(action: {
+                onShowDetail(coin)
+            }) {
+                Image(systemName: "info.circle")
+                    .foregroundColor(.secondary.opacity(0.7))
+                    .font(.body)
+            }
+            .buttonStyle(.plain)
+            .help("查看\(coin.symbol)详细信息")
+
+            // 删除按钮
             Button(action: {
                 viewModel.deleteCoin(coin: coin)
             }) {
@@ -863,27 +973,199 @@ struct SettingsView: View {
             Text("设置")
                 .font(.largeTitle)
                 .fontWeight(.bold)
+                .padding(.bottom, 10)
 
-            Form {
-                Toggle("启用价格提醒", isOn: $settings.notificationsEnabled)
-                
-                if settings.notificationsEnabled {
-                    Stepper(value: $settings.alertThreshold, in: 0.1...10.0, step: 0.1) {
-                        Text("波动阈值: \(String(format: "%.1f", settings.alertThreshold))%")
+            // Enable/Disable Toggle
+            Toggle(isOn: $settings.notificationsEnabled) {
+                Text("启用价格提醒")
+                    .font(.headline)
+            }
+            .padding(.horizontal)
+
+            if settings.notificationsEnabled {
+                // Alert Parameters Section (custom layout, not Form Section)
+                VStack(alignment: .leading, spacing: 15) {
+                    Text("提醒参数")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .padding(.leading) // Indent title
+
+                    // Volatility Threshold
+                    HStack {
+                        Text("波动阈值:")
+                        Spacer()
+                        Stepper(value: $settings.alertThreshold, in: 0.1...10.0, step: 0.1) {
+                            Text(String(format: "%.1f%%", settings.alertThreshold))
+                        }
                     }
-                    
-                    Stepper("时间窗口: \(settings.alertTimeWindow) 分钟", value: $settings.alertTimeWindow, in: 1...60)
+                    .padding(.horizontal)
+
+                    // Time Window
+                    HStack {
+                        Text("时间窗口:")
+                        Spacer()
+                        Stepper(value: $settings.alertTimeWindow, in: 1...60) {
+                            Text("\(settings.alertTimeWindow) 分钟")
+                        }
+                    }
+                    .padding(.horizontal)
                 }
+                .padding(.vertical, 10)
+                .background(Color.gray.opacity(0.1)) // Subtle background
+                .cornerRadius(8) // Rounded corners for the section
+                .padding(.horizontal) // Padding to separate from edges
             }
             
+            Spacer() // Pushes content to top
+
+            // Buttons
             HStack {
-                Button("测试提醒", action: onTest)
                 Spacer()
+                Button("测试提醒", action: onTest)
                 Button("完成", action: onDone)
                     .buttonStyle(.borderedProminent)
             }
+            .padding(.horizontal)
         }
-        .padding()
+        .padding(.vertical) // Overall vertical padding
         .frame(width: 350)
+    }
+}
+
+// =================================================================================
+// MARK: - 币对详细信息视图
+// =================================================================================
+
+struct CoinDetailView: View {
+    let coin: Coin
+    var onBack: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Button(action: onBack) {
+                    Image(systemName: "chevron.left")
+                        .font(.title2)
+                }
+                .buttonStyle(.plain)
+                .help("返回")
+
+                Spacer()
+
+                Text("\(coin.symbol.replacingOccurrences(of: "-USDT", with: "")) 详情")
+                    .font(.headline)
+                    .fontWeight(.bold)
+
+                Spacer()
+            }
+            .padding([.horizontal, .top])
+            .padding(.bottom, 10)
+
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 15) {
+                    // Current Price & 24h Change
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(coin.price == "..." ? "..." : NumberFormatter.currencyFormatter.string(from: NSNumber(value: Double(coin.price) ?? 0)) ?? "...")
+                            .font(.largeTitle)
+                            .fontWeight(.bold)
+                            .foregroundColor(.primary)
+
+                        if let change = coin.change24h {
+                            Text(change)
+                                .font(.title2)
+                                .fontWeight(.semibold)
+                                .foregroundColor(change.hasPrefix("+") ? .green : (change.hasPrefix("-") ? .red : .secondary))
+                        }
+                    }
+                    .padding(.vertical, 10)
+
+                    // High/Low
+                    HStack {
+                        if let high = coin.high24h, let highDouble = Double(high) {
+                            VStack(alignment: .leading) {
+                                Text("24小时最高")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Text(NumberFormatter.currencyFormatter.string(from: NSNumber(value: highDouble)) ?? "...")
+                                    .font(.subheadline)
+                                    .fontWeight(.medium)
+                            }
+                        }
+                        Spacer()
+                        if let low = coin.low24h, let lowDouble = Double(low) {
+                            VStack(alignment: .trailing) {
+                                Text("24小时最低")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Text(NumberFormatter.currencyFormatter.string(from: NSNumber(value: lowDouble)) ?? "...")
+                                    .font(.subheadline)
+                                    .fontWeight(.medium)
+                            }
+                        }
+                    }
+                    .padding(.vertical, 5)
+
+                    Divider()
+
+                    // Volume
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("成交量")
+                            .font(.headline)
+                            .foregroundColor(.primary)
+
+                        if let vol = coin.vol24h, let volDouble = Double(vol) {
+                            DetailRow(label: "24小时成交量 (币)", value: NumberFormatter.largeNumberFormatter.string(from: NSNumber(value: volDouble)) ?? "...")
+                        }
+                        if let volCcy = coin.volCcy24h, let volCcyDouble = Double(volCcy) {
+                            DetailRow(label: "24小时成交额 (USDT)", value: NumberFormatter.largeNumberFormatter.string(from: NSNumber(value: volCcyDouble)) ?? "...")
+                        }
+                    }
+                    .padding(.vertical, 5)
+
+                    Divider()
+
+                    // Open Prices
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("开盘价")
+                            .font(.headline)
+                            .foregroundColor(.primary)
+
+                        if let sodUtc0 = coin.sodUtc0, let sodUtc0Double = Double(sodUtc0) {
+                            DetailRow(label: "UTC+0", value: NumberFormatter.currencyFormatter.string(from: NSNumber(value: sodUtc0Double)) ?? "...")
+                        }
+                        if let sodUtc8 = coin.sodUtc8, let sodUtc8Double = Double(sodUtc8) {
+                            DetailRow(label: "UTC+8", value: NumberFormatter.currencyFormatter.string(from: NSNumber(value: sodUtc8Double)) ?? "...")
+                        }
+                    }
+                    .padding(.vertical, 5)
+                }
+                .padding(.horizontal)
+                .padding(.bottom)
+            }
+        }
+        .frame(width: 320, height: 400) // 调整尺寸以适应更多信息和新布局
+        .background(.ultraThinMaterial)
+        .cornerRadius(10)
+        .shadow(radius: 5)
+    }
+}
+
+struct DetailRow: View {
+    let label: String
+    let value: String
+    var valueColor: Color = .primary
+
+    var body: some View {
+        HStack {
+            Text(label)
+                .foregroundColor(.secondary)
+            Spacer()
+            Text(value)
+                .foregroundColor(valueColor)
+                .fontWeight(.medium)
+        }
     }
 }
