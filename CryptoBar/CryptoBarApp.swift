@@ -548,37 +548,44 @@ struct CoinRowView: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            // 币种图标
-            Image(systemName: "bitcoinsign.circle.fill")
-                .font(.title)
-                .foregroundColor(.primary.opacity(0.8))
-            
-            // 币种信息
-            VStack(alignment: .leading, spacing: 2) {
-                Text(coin.symbol.replacingOccurrences(of: "-USDT", with: ""))
-                    .fontWeight(.semibold)
-                Text("OKX")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-            
-            Spacer()
-            
-            // 价格和涨跌幅
-            VStack(alignment: .trailing, spacing: 2) {
-                Text(coin.price == "..." ? "..." : "$\(coin.price)")
-                    .font(.system(.body, design: .monospaced))
-                    .fontWeight(.medium)
-                
-                if let change = coin.change24h {
-                    Text(change)
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .foregroundColor(change.hasPrefix("+") ? .green : (change.hasPrefix("-") ? .red : .secondary))
+            Button(action: {
+                viewModel.selectCoin(coin: coin)
+            }) {
+                HStack {
+                    // Icon and text
+                    Image(systemName: "bitcoinsign.circle.fill")
+                        .font(.title)
+                        .foregroundColor(.primary.opacity(0.8))
+                    
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(coin.symbol.replacingOccurrences(of: "-USDT", with: ""))
+                            .fontWeight(.semibold)
+                        Text("OKX")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    Spacer()
+                    
+                    // Price and change
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(coin.price == "..." ? "..." : "$\(coin.price)")
+                            .font(.system(.body, design: .monospaced))
+                            .fontWeight(.medium)
+                        
+                        if let change = coin.change24h {
+                            Text(change)
+                                .font(.caption)
+                                .fontWeight(.medium)
+                                .foregroundColor(change.hasPrefix("+") ? .green : (change.hasPrefix("-") ? .red : .secondary))
+                        }
+                    }
                 }
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
 
-            // 删除按钮
+            // Delete button is now a sibling in the outer HStack
             Button(action: {
                 viewModel.deleteCoin(coin: coin)
             }) {
@@ -593,9 +600,6 @@ struct CoinRowView: View {
         .padding(.horizontal, 8)
         .background(viewModel.selectedCoinSymbol == coin.symbol ? Color.accentColor.opacity(0.2) : Color.clear)
         .cornerRadius(8)
-        .onTapGesture {
-            viewModel.selectCoin(coin: coin)
-        }
         .animation(.easeInOut(duration: 0.2), value: viewModel.selectedCoinSymbol)
     }
 }
