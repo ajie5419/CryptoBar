@@ -38,3 +38,5 @@ The application will appear in your macOS menu bar.
 -   Dedicated preferences window for advanced settings.
 -   Customizable refresh rates and notification options.
 -   More detailed coin information on tap.
+## Power
+    for gemini-2.5pro
