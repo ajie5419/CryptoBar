@@ -24,7 +24,7 @@ CryptoBar is a lightweight macOS menu bar application designed to provide real-t
 
 1.  **Clone the repository**:
     ```bash
-    git clone https://github.com/YOUR_USERNAME/CryptoBar.git
+    git clone https://github.com/ajie5419/CryptoBar.git
     cd CryptoBar
     ```
 2.  **Open in Xcode**: Open the `CryptoBar.xcodeproj` file in Xcode.
