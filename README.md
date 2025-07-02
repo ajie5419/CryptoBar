@@ -4,13 +4,19 @@ CryptoBar is a lightweight macOS menu bar application designed to provide real-t
 
 ## Features
 
--   **Real-time Price Updates**: Fetches live cryptocurrency prices from OKX exchange via WebSocket, ensuring minimal latency.
--   **Customizable Coin List**: Easily add or remove cryptocurrency pairs (e.g., BTC-USDT, ETH-USDT) to track.
--   **24-Hour Price Change**: Displays the percentage change of each tracked coin over the last 24 hours, with intuitive green/red color coding for gains/losses.
--   **Robust Input Validation**: New coin pairs are validated against the OKX exchange's official API to ensure they exist before being added.
--   **Network Status Feedback**: Provides clear visual cues in the UI and menu bar when the WebSocket connection is disconnected, along with automatic reconnection attempts.
--   **Persistent Configuration**: Your tracked coin list and selected display coin are saved across app launches.
--   **Modern UI**: Built with SwiftUI, offering a native and responsive user experience.
+-   **实时价格更新 (Real-time Price Updates)**: 通过 WebSocket 从 OKX 交易所获取实时加密货币价格，确保低延迟。
+-   **可定制币对列表 (Customizable Coin List)**: 轻松添加或移除要追踪的加密货币对（例如：BTC-USDT, ETH-USDT）。
+-   **24小时价格变化 (24-Hour Price Change)**: 显示每个追踪币对在过去24小时内的百分比变化，并用直观的绿色/红色表示涨跌。
+-   **币对输入验证 (Coin Pair Input Validation)**: 新增币对时，会通过 OKX 交易所的官方 API 验证其是否存在，确保数据有效性。
+-   **价格波动提醒 (Price Fluctuation Alerts)**: 用户可以设置价格波动阈值和时间窗口，当币对价格在指定时间内超过设定的波动百分比时，应用会发送通知提醒。
+-   **详细币对信息视图 (Detailed Coin Information View)**: 提供一个专门的视图，显示币对的24小时最高价、最低价、成交量以及UTC+0和UTC+8的开盘价等详细市场数据。
+-   **网络状态反馈 (Network Status Feedback)**: 当 WebSocket 连接断开时，在 UI 和菜单栏中提供清晰的视觉提示，并自动尝试重新连接。
+-   **持久化配置 (Persistent Configuration)**: 您追踪的币对列表和选定的显示币对会在应用重启后保留。
+-   **现代化用户界面 (Modern UI)**: 使用 SwiftUI 构建，提供原生且响应迅速的用户体验。
+-   **UI/UX 改进 (UI/UX Improvements)**:
+    *   添加币对时有加载指示器和错误信息提示。
+    *   币对列表中新增了查看详细信息的按钮。
+    *   设置界面现在包含价格提醒的配置选项。
 
 ## Technologies Used
 
