@@ -39,4 +39,4 @@ The application will appear in your macOS menu bar.
 -   Customizable refresh rates and notification options.
 -   More detailed coin information on tap.
 ## Power
-    for gemini-2.5pro
+-   for gemini-2.5pro
